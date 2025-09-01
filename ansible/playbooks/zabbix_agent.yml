@@ -1,0 +1,63 @@
+---
+- name: Install and configure Zabbix Agent on Router and Server
+  hosts: router,server
+  become: yes
+  tasks:
+
+#    - name: Ensure Zabbix repo package is present (Ubuntu 24.04 ARM64)
+#      ansible.builtin.apt:
+#        deb: "https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.0-2+ubuntu24.04_all.deb"
+
+#    - name: Update apt cache
+#     ansible.builtin.apt:
+#        update_cache: yes
+
+#    - name: Install Zabbix Agent
+#      ansible.builtin.apt:
+#        name: zabbix-agent
+#        state: present
+
+    - name: Configure Zabbix Agent (Passive Server)
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Server='
+        line: "Server=172.16.29.140"
+        state: present
+      notify: Restart Zabbix Agent
+
+    - name: Configure Zabbix Agent (Active Server)
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^ServerActive='
+        line: "ServerActive=172.16.29.140"
+        state: present
+      notify: Restart Zabbix Agent
+
+    - name: Configure Hostname
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Hostname='
+        line: "Hostname={{ zabbix_hostname }}"
+        state: present
+      notify: Restart Zabbix Agent
+
+    - name: Ensure Zabbix Agent service is enabled and started
+      ansible.builtin.service:
+        name: zabbix-agent
+        enabled: yes
+        state: started
+
+    - name: Verify Zabbix Agent service status
+      ansible.builtin.command: systemctl is-active zabbix-agent
+      register: agent_status
+      changed_when: false
+
+    - name: Show agent status
+      ansible.builtin.debug:
+        msg: "Zabbix Agent on {{ inventory_hostname }} is {{ agent_status.stdout }}"
+
+  handlers:
+    - name: Restart Zabbix Agent
+      ansible.builtin.service:
+        name: zabbix-agent
+        state: restarted

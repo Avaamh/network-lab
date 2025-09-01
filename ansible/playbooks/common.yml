@@ -1,0 +1,53 @@
+- name: Common setup for Debian-family hosts
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # packages to install on Debian-based systems
+    debian_pkgs:
+      - zabbix-agent
+      - fail2ban
+
+    zabbix_server_ip: "172.16.29.140"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install packages
+      apt:
+        name: "{{ debian_pkgs }}"
+        state: present
+      register: install_result
+      ignore_errors: yes
+
+    - name: Ensure sshd config - disable root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        backup: yes
+
+    - name: Ensure sshd config - disable password auth (keys only)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        backup: yes
+
+    - name: Reload/Restart ssh
+      service:
+        name: ssh
+        state: restarted
+      ignore_errors: yes
+
+    - name: Ensure fail2ban is enabled and started
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+      ignore_errors: yes
+
