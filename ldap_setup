@@ -1,0 +1,314 @@
+---
+- name: Install and configure OpenLDAP (base + users + group)
+  hosts: server
+  become: yes
+  vars:
+    ldap_domain: "lab.com"
+    ldap_organization: "Lab Inc"
+    ldap_admin_password: "AdminPass123"
+    base_dn: "dc=lab,dc=com"
+    admin_dn: "cn=admin,{{ base_dn }}"
+    ldap_users:
+      - uid: jdoe
+        cn: "John Doe"
+        sn: "Doe"
+        uidNumber: 10000
+        gidNumber: 10000
+        password: "UserPass1"
+      - uid: asmith
+        cn: "Alice Smith"
+        sn: "Smith"
+        uidNumber: 10001
+        gidNumber: 10000
+        password: "UserPass2"
+    ldap_group:
+      name: labgroup
+      gidNumber: 10000
+      members:
+        - jdoe
+        - asmith
+
+  tasks:
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - slapd
+          - ldap-utils
+          - debconf-utils
+          - openssl
+        state: present
+
+    - name: Preseed slapd debconf values
+      debconf:
+        name: slapd
+        question: "{{ item.question }}"
+        value: "{{ item.value }}"
+        vtype: "{{ item.vtype }}"
+      loop:
+        - { question: "slapd/no_configuration", value: "false", vtype: "boolean" }
+        - { question: "slapd/domain", value: "{{ ldap_domain }}", vtype: "string" }
+        - { question: "slapd/organization", value: "{{ ldap_organization }}", vtype: "string" }
+        - { question: "slapd/password1", value: "{{ ldap_admin_password }}", vtype: "password" }
+        - { question: "slapd/password2", value: "{{ ldap_admin_password }}", vtype: "password" }
+        - { question: "slapd/backend", value: "MDB", vtype: "select" }
+
+    - name: Reconfigure slapd non-interactively
+      ansible.builtin.command: dpkg-reconfigure -f noninteractive slapd
+
+    - name: Ensure slapd is started and enabled
+      systemd:
+        name: slapd
+        state: started
+        enabled: yes
+
+    - name: Ensure /etc/ldap/ldap.conf has proper BASE and URI
+      copy:
+        dest: /etc/ldap/ldap.conf
+        content: |
+          # LDAP client defaults
+          BASE {{ base_dn }}
+          URI ldap://127.0.0.1
+
+    - name: Create base LDIF (domain and OUs)
+      copy:
+        dest: /tmp/base.ldif
+        content: |
+          dn: {{ base_dn }}
+          objectClass: top
+          objectClass: dcObject
+          objectClass: organization
+          o: {{ ldap_organization }}
+          dc: {{ ldap_domain.split('.')[0] }}
+
+          dn: ou=People,{{ base_dn }}
+          objectClass: organizationalUnit
+          ou: People
+
+          dn: ou=Groups,{{ base_dn }}
+          objectClass: organizationalUnit
+          ou: Groups
+
+    - name: Add base LDIF if not present
+      shell: |
+        ldapsearch -x -LLL -H ldap://127.0.0.1 -b "{{ base_dn }}" dn | grep "{{ base_dn }}" >/dev/null 2>&1 || \
+        ldapadd -x -D "{{ admin_dn }}" -w "{{ ldap_admin_password }}" -f /tmp/base.ldif
+      args:
+        executable: /bin/bash
+
+    - name: Generate hashed passwords for users and build user LDIFs
+      block:
+        - name: Generate password hash for each user
+          command: slappasswd -s "{{ item.password }}"
+          register: pwhash_results
+          loop: "{{ ldap_users }}"
+          loop_control:
+            label: "{{ item.uid }}"
+          changed_when: false
+
+        - name: Create LDIF files for each user
+          copy:
+            dest: "/tmp/{{ item.item.uid }}.ldif"
+            content: |
+              dn: uid={{ item.item.uid }},ou=People,{{ base_dn }}
+              objectClass: inetOrgPerson
+              objectClass: posixAccount
+              objectClass: shadowAccount
+              cn: {{ item.item.cn }}
+              sn: {{ item.item.sn }}
+              uid: {{ item.item.uid }}
+              uidNumber: {{ item.item.uidNumber }}
+              gidNumber: {{ item.item.gidNumber }}
+              homeDirectory: /home/{{ item.item.uid }}
+              loginShell: /bin/bash
+              userPassword: {{ item.stdout }}
+          loop: "{{ pwhash_results.results }}"
+          loop_control:
+            label: "{{ item.item.uid }}"
+
+
+    - name: Create base OU structure
+      copy:
+        dest: /tmp/base_ou.ldif
+        content: |
+          dn: ou=Groups,dc=lab,dc=com
+          objectClass: organizationalUnit
+          ou: Groups
+
+          dn: ou=Users,dc=lab,dc=com
+          objectClass: organizationalUnit
+          ou: Users
+
+    - name: Add base OU structure
+      shell: ldapadd -x -D "cn=admin,dc=lab,dc=com" -w "AdminPass123" -f /tmp/base_ou.ldif
+      args:
+        executable: /bin/bash
+      register: ou_result
+      failed_when: "'Already exists' not in ou_result.stderr and ou_result.rc != 0"
+
+
+
+    - name: Add users if not exist
+      command: ldapadd -x -D "cn=admin,{{ base_dn }}" -w {{ ldap_admin_password }} -f /tmp/{{ item.uid }}.ldif
+      loop: "{{ ldap_users }}"
+      loop_control:
+        label: "{{ item.uid }}"
+      register: ldapadd_users
+      failed_when: false
+      changed_when: "'adding new entry' in ldapadd_users.stdout"
+
+    - name: Create group LDIF
+      copy:
+        dest: /tmp/group.ldif
+        content: |
+          dn: cn={{ ldap_group.name }},ou=Groups,{{ base_dn }}
+          objectClass: top
+          objectClass: posixGroup
+          cn: {{ ldap_group.name }}
+          gidNumber: {{ ldap_group.gidNumber }}
+          {% for m in ldap_group.members %}
+          memberUid: {{ m }}
+          {% endfor %}
+
+    - name: Add group if not exists
+      shell: |
+        ldapsearch -x -LLL -H ldap://127.0.0.1 -b "cn={{ ldap_group.name }},ou=Groups,{{ base_dn }}" cn | grep '^cn:' >/dev/null 2>&1 || \
+        ldapadd -x -D "{{ admin_dn }}" -w "{{ ldap_admin_password }}" -f /tmp/group.ldif
+      args:
+        executable: /bin/bash
+
+#################################################################################################
+
+#    - name: Install SSSD and dependencies
+#      apt:
+#        name:
+#          - sssd
+#          - sssd-ldap
+#          - libnss-sss
+#          - libpam-sss
+#        state: present
+#        update_cache: yes
+#
+#    - name: Configure sssd.conf
+#      copy:
+#        dest: /etc/sssd/sssd.conf
+#        owner: root
+#        group: root
+#        mode: '0600'
+#        content: |
+#          [sssd]
+#          services = nss, pam
+#          domains = LAB.COM
+#
+#          [domain/LAB.COM]
+#          id_provider = ldap
+#          auth_provider = ldap
+#          ldap_uri = ldap://127.0.0.1
+#          ldap_search_base = dc=lab,dc=com
+#          ldap_default_bind_dn = cn=admin,dc=lab,dc=com
+#          ldap_default_authtok = AdminPass123
+#          ldap_tls_reqcert = never
+#          cache_credentials = True
+#
+#    - name: Enable SSSD in nsswitch.conf
+#      lineinfile:
+#        path: /etc/nsswitch.conf
+#        regexp: '^(passwd|group|shadow):'
+#        line: '\1: files systemd sss'
+#        backrefs: yes
+#
+#    - name: Configure PAM to use SSSD
+#      command: pam-auth-update --enable sss
+#
+#    - name: Ensure sssd service is enabled and started
+#      service:
+#        name: sssd
+#        state: started
+#        enabled: yes
+#
+#
+#
+#    - name: Restart SSSD to apply config
+#      ansible.builtin.service:
+#        name: sssd
+#        state: restarted
+#        enabled: yes
+#
+#    - name: Clear SSSD caches
+#      ansible.builtin.command: sss_cache -E
+#      changed_when: false
+#      failed_when: false
+#
+#    - name: Wait until SSSD responds for each LDAP user
+#      ansible.builtin.shell: getent passwd "{{ item }}"
+#      args:
+#        executable: /bin/bash
+#      register: getent_check
+#      retries: 10
+#      delay: 3
+#      until: getent_check.rc == 0
+#      loop:
+#        - jdoe
+#        - asmith
+#
+#    - name: Ensure lab group is resolvable
+#      ansible.builtin.shell: getent group "labgroup"
+#      args:
+#        executable: /bin/bash
+#      register: getent_grp
+#      retries: 10
+#      delay: 3
+#      until: getent_grp.rc == 0
+#
+#    - name: Create home directories (if missing)
+#      ansible.builtin.file:
+#        path: "/home/{{ item }}"
+#        state: directory
+#        mode: "0755"
+#      loop:
+#        - jdoe
+#        - asmith
+#
+#    - name: Set ownership of home directories to LDAP users
+#      ansible.builtin.file:
+#        path: "/home/{{ item }}"
+#        state: directory
+#        owner: "{{ item }}"
+#        group: "labgroup"
+#        mode: "0755"
+#      loop:
+#        - jdoe
+#        - asmith
+
+#############################################################################
+
+
+
+#    - name: Set proper permissions for home directories (optional)
+#      file:
+#        path: "/home/{{ item.uid }}"
+#        state: directory
+#        owner: "{{ item.uid }}"
+#        group: "{{ item.gidNumber }}"
+#        mode: "0755"
+#      loop: "{{ ldap_users }}"
+#      ignore_errors: yes
+
+    - name: Restart slapd to ensure changes applied
+      systemd:
+        name: slapd
+        state: restarted
+
+    - name: Show quick LDAP summary (for logs)
+      shell: ldapsearch -x -LLL -H ldap://127.0.0.1 -b "{{ base_dn }}" "(objectClass=*)" dn | sed -n '1,200p'
+      register: ldap_summary
+      changed_when: false
+
+    - name: Print LDAP summary
+      debug:
+        var: ldap_summary.stdout_lines
