@@ -23,5 +23,5 @@ It simulates a small IT infrastructure with **4 virtual machines**:
 - Practice monitoring and security
 - Create a portfolio project for future IT administrator jobs
 
-## Repository Structure
+Note: The configuration files in this repository contain test passwords that were used only for temporary lab VMs. These systems no longer exist, and the credentials are kept here solely for project completeness
 
