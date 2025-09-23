@@ -1,0 +1,83 @@
+---
+- name: Configure LDAP authentication on VMs (server, router, zabbix)
+  hosts: server,router,zabbix
+  become: yes
+  vars:
+    ldap_uri: "ldap://172.16.161.137"
+    ldap_base_dn: "dc=lab,dc=com"
+    ldap_bind_dn: "cn=admin,dc=lab,dc=com"
+    ldap_bind_pw: "AdminPass123"   # ⚠️ store this in ansible-vault in production
+
+  tasks:
+
+    - name: Install SSSD and dependencies
+      apt:
+        name:
+          - sssd
+          - sssd-ldap
+          - libnss-sss
+          - libpam-sss
+          - libpam-mkhomedir   # auto home dir package
+        state: present
+        update_cache: yes
+
+    - name: Configure sssd.conf
+      copy:
+        dest: /etc/sssd/sssd.conf
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          [sssd]
+          services = nss, pam
+          domains = lab.com
+
+          [domain/lab.com]
+          id_provider = ldap
+          auth_provider = ldap
+          ldap_uri = {{ ldap_uri }}
+          ldap_search_base = {{ ldap_base_dn }}
+          ldap_default_bind_dn = {{ ldap_bind_dn }}
+          ldap_default_authtok = {{ ldap_bind_pw }}
+          ldap_tls_reqcert = never
+          cache_credentials = True
+
+    - name: Enable SSSD in nsswitch.conf
+      lineinfile:
+        path: /etc/nsswitch.conf
+        regexp: '^(passwd|group|shadow):'
+        line: '\1: files systemd sss'
+        backrefs: yes
+
+    - name: Enable PAM to use SSSD
+      command: pam-auth-update --enable sss
+      register: pam_result
+      changed_when: pam_result.rc == 0
+
+    - name: Ensure sssd is enabled and started
+      systemd:
+        name: sssd
+        state: started
+        enabled: yes
+
+    - name: Enable mkhomedir PAM module
+      command: pam-auth-update --enable mkhomedir
+
+
+    - name: Clear SSSD caches
+      command: sss_cache -E
+      changed_when: false
+      failed_when: false
+
+    - name: Verify LDAP user jdoe is resolvable
+      shell: getent passwd jdoe
+      register: getent_check
+      retries: 5
+      delay: 3
+      until: getent_check.rc == 0
+      ignore_errors: yes
+
+    - name: Show getent result for jdoe
+      debug:
+        var: getent_check.stdout
+

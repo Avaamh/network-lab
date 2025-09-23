@@ -1,0 +1,78 @@
+---
+- name: Configure Router with Suricata
+  hosts: router
+  become: yes
+
+  vars:
+    suricata_config: /etc/suricata/suricata.yaml
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Suricata and dependencies
+      apt:
+        name:
+          - suricata
+          - suricata-update
+        state: present
+
+    - name: Run suricata-update to fetch latest rules
+      command: suricata-update
+      notify: Restart Suricata
+
+
+    - name: Configure Suricata to monitor WAN and LAN
+      blockinfile:
+        path: "{{ suricata_config }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          vars:
+            address-groups:
+              HOME_NET: "[{{ lan_subnet }}/24]"
+              EXTERNAL_NET: "!$HOME_NET"
+
+          af-packet:
+            - interface: {{ wan_interface }}
+              cluster-id: 99
+              cluster-type: cluster_flow
+              defrag: yes
+
+            - interface: {{ lan_interface }}
+              cluster-id: 98
+              cluster-type: cluster_flow
+              defrag: yes
+
+          default-log-dir: /var/log/suricata/
+
+          outputs:
+            - fast:
+                enabled: yes
+                filename: fast.log
+            - eve-log:
+                enabled: yes
+                filetype: regular
+                filename: eve.json
+                types:
+                  - alert
+                  - dns
+                  - http
+                  - tls
+                  - ssh
+                  - flow
+
+
+
+    - name: Enable and start Suricata service
+      systemd:
+        name: suricata
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: Restart Suricata
+      systemd:
+        name: suricata
+        state: restarted
+

@@ -1,0 +1,18 @@
+---
+- name: Run dhclient on internal servers
+  hosts: server,zabbix
+  become: true
+  tasks:
+    - name: Release current DHCP leases (optional)
+      command: dhclient -r
+      ignore_errors: true
+
+    - name: Obtain IP via DHCP
+      command: dhclient
+      register: dhclient_result
+      ignore_errors: true
+
+    - name: Show dhclient output
+      debug:
+        var: dhclient_result.stdout_lines
+
