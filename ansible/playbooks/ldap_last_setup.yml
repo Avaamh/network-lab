@@ -6,7 +6,7 @@
   vars:
     ldap_domain: "lab.com"
     ldap_organization: "Lab Inc"
-    ldap_admin_password: "AdminPass123"   # ⚠️ replace with ansible-vault in real use
+    ldap_admin_password: "AdminPass123"   # should be replaced with ansible-vault in real use
     base_dn: "dc=lab,dc=com"
     admin_dn: "cn=admin,{{ base_dn }}"
 
